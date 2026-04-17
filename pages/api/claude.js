@@ -4,7 +4,7 @@
  * POST /api/claude -> proxies generateContent
  */
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
 function toGeminiContents(messages) {

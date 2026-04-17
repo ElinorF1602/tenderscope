@@ -1,4 +1,4 @@
-/**
+const GEMINI_MODEL = 'gemini-2.5-flash-lite';
  * Secure proxy for Google Gemini API.
  * GET /api/claude -> lists available Gemini models
  * POST /api/claude -> proxies generateContent

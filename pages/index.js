@@ -187,6 +187,7 @@ export default function App() {
   const [scanning,       setScanning]       = useState(false);
   const [scanMsg,        setScanMsg]        = useState("");
   const [lastScan,       setLastScan]       = useState(null);
+  const [sitesWithTenders, setSitesWithTenders] = useState(new Set());
   const [activeFilters,  setActiveFilters]  = useState(new Set(["all"]));
   const [confirmDeleteId,setConfirmDeleteId]= useState(null);
   const [urlInput,       setUrlInput]       = useState("");
@@ -207,6 +208,8 @@ export default function App() {
       if (storedLogo) setLogoSrc(storedLogo);
       const saved = await db.get("tenders");
       const ls    = await db.get("lastScan");
+      const savedSites = await db.get("sitesWithTenders");
+      if (savedSites) setSitesWithTenders(new Set(savedSites));
       if (saved?.length) { setTenders(saved); setLastScan(ls); }
       const today = new Date().toDateString();
       if (!ls || new Date(ls).toDateString() !== today) await scan(saved || []);
@@ -252,6 +255,16 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
         const parsed = JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1));
         foundTenders = parsed.tenders || [];
       }
+      // Track which sites had tenders found
+      const sitesFound = new Set();
+      foundTenders.forEach(t => {
+        if (t.source) sitesFound.add(t.source.toLowerCase().trim());
+        if (t.url) {
+          try { sitesFound.add(new URL(t.url).hostname.toLowerCase().replace(/^www\./, "")); } catch {}
+        }
+      });
+      setSitesWithTenders(sitesFound);
+      await db.set("sitesWithTenders", [...sitesFound]);
     } catch (e) {
       setScanMsg("⚠️ שגיאה בחיפוש: " + e.message);
       setScanning(false);
@@ -511,9 +524,34 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
       <div style={{ background: "#f1f5f9", borderBottom: "1px solid rgba(220,38,38,0.08)", padding: "6px 24px" }}>
         <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 10.5, fontWeight: 700, color: "#64748b", flexShrink: 0 }}>🔍 אתרים שנסרקים:</span>
-          {["mr.gov.il","hameshakem.co.il","masham.org.il","tel-aviv.gov.il","jerusalem.muni.il","haifa.muni.il","beersheba.muni.il","rishonlezion.muni.il","petah-tikva.muni.il","ashdod.muni.il","netanya.muni.il","holon.muni.il","bnei-brak.muni.il","rail.co.il","natey.co.il","neta.co.il","mashcal.co.il","npa.gov.il","iaa.gov.il","ports.co.il","netivei-israel.co.il","mot.gov.il","iec.co.il","mekorot.co.il","nta.co.il","moch.gov.il","economy.gov.il","raanana.muni.il","herzliya.muni.il","rehovot.muni.il","modiin.muni.il","hagihon.co.il","tashtit.co.il","ramat-hasharon.muni.il","tiberias.muni.il"].map(site => (
-            <span key={site} style={{ fontSize: 9.5, background: "white", border: "1px solid rgba(220,38,38,0.15)", borderRadius: 4, padding: "2px 6px", color: "#475569", fontFamily: "monospace" }}>{site}</span>
-          ))}
+          {["mr.gov.il","hameshakem.co.il","masham.org.il","tel-aviv.gov.il","jerusalem.muni.il","haifa.muni.il","beersheba.muni.il","rishonlezion.muni.il","petah-tikva.muni.il","ashdod.muni.il","netanya.muni.il","holon.muni.il","bnei-brak.muni.il","rail.co.il","natey.co.il","neta.co.il","mashcal.co.il","npa.gov.il","iaa.gov.il","ports.co.il","netivei-israel.co.il","mot.gov.il","iec.co.il","mekorot.co.il","nta.co.il","moch.gov.il","economy.gov.il","raanana.muni.il","herzliya.muni.il","rehovot.muni.il","modiin.muni.il","hagihon.co.il","tashtit.co.il","ramat-hasharon.muni.il","tiberias.muni.il"].map(site => {
+            const hasTenders = [...sitesWithTenders].some(s => s.includes(site) || site.includes(s));
+            const wasScanned = !!lastScan;
+            return (
+              <span key={site} title={hasTenders ? "נמצאו מכרזים באתר זה" : wasScanned ? "נסרק — לא נמצאו מכרזים" : "טרם נסרק"} style={{
+                fontSize: 9.5,
+                background: hasTenders ? "rgba(52,211,153,0.1)" : wasScanned ? "rgba(56,189,248,0.05)" : "white",
+                border: `1px solid ${hasTenders ? "rgba(52,211,153,0.45)" : wasScanned ? "rgba(56,189,248,0.2)" : "rgba(220,38,38,0.15)"}`,
+                borderRadius: 4,
+                padding: "2px 6px 2px 5px",
+                color: hasTenders ? "#16a34a" : wasScanned ? "#64748b" : "#475569",
+                fontFamily: "monospace",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 3,
+              }}>
+                {site}
+                {hasTenders && <span style={{ color: "#16a34a", fontSize: 9, fontWeight: 900, fontFamily: "sans-serif" }}>✓</span>}
+                {!hasTenders && wasScanned && <span style={{ color: "#94a3b8", fontSize: 9, fontFamily: "sans-serif" }}>✓</span>}
+              </span>
+            );
+          })}
+          {lastScan && (
+            <span style={{ fontSize: 9, color: "#94a3b8", marginRight: "auto", whiteSpace: "nowrap" }}>
+              <span style={{ color: "#16a34a" }}>✓</span> מכרזים נמצאו  
+              <span style={{ color: "#94a3b8" }}>✓</span> נסרק, אין מכרזים
+            </span>
+          )}
         </div>
       </div>
 

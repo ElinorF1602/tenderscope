@@ -57,17 +57,21 @@ export default async function handler(req, res) {
     if (usesWebSearch) {
       geminiBody.tools = [{ google_search: {} }];
     }
-    const response = await fetch(`${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(geminiBody),
-    });
-    const data = await response.json();
-    if (!response.ok) {
-      console.error('Gemini error:', JSON.stringify(data));
-      return res.status(response.status).json(data);
-    }
-    const parts = data.candidates?.[0]?.content?.parts || [];
+        let response, data;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                        response = await fetch(`${GEMINI_BASE}/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify(geminiBody),
+                        });
+                        data = await response.json();
+                        if (response.status !== 503) break;
+                        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+            }
+            if (!response.ok) {
+                        console.error('Gemini error:', JSON.stringify(data));
+                        return res.status(response.status).json(data);
+            }const parts = data.candidates?.[0]?.content?.parts || [];
     const text = parts.map(p => p.text || '').join('');
     return res.status(200).json({ content: [{ type: 'text', text }], model: GEMINI_MODEL, role: 'assistant' });
   } catch (err) {

@@ -72,7 +72,7 @@ export default async function handler(req, res) {
                         console.error('Gemini error:', JSON.stringify(data));
                         return res.status(response.status).json(data);
             }const parts = data.candidates?.[0]?.content?.parts || [];
-    const text = parts.map(p => p.text || '').join('');
+            const text = parts.filter(p => !p.thought).map(p => p.text || '').join('');
     return res.status(200).json({ content: [{ type: 'text', text }], model: GEMINI_MODEL, role: 'assistant' });
   } catch (err) {
     console.error('Gemini proxy error:', err);

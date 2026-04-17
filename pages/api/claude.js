@@ -4,12 +4,12 @@
  * POST /api/claude -> proxies generateContent with model fallback
  */
 
-// Try models in order until one responds (503 = overloaded, try next)
+// Try models in order; skip to next on any error (503=overload, 404=unavailable, etc.)
 const GEMINI_MODELS = [
-  'gemini-2.0-flash-lite',
-  'gemini-2.0-flash',
+  'gemini-2.5-flash-lite',
   'gemini-flash-lite-latest',
   'gemini-flash-latest',
+  'gemini-2.5-flash',
 ];
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
@@ -28,8 +28,8 @@ function toGeminiContents(messages) {
         if (block.type === 'image' && block.source?.type === 'base64') {
           return { inlineData: { mimeType: block.source.media_type, data: block.source.data } };
         }
-        return { text: '' };
-      }).filter(p => p.text !== '' || p.inlineData);
+        return null;
+      }).filter(Boolean);
     } else {
       parts = [{ text: '' }];
     }
@@ -62,31 +62,35 @@ export default async function handler(req, res) {
 
     let response, data, usedModel;
 
-    // Try each model; move to next if 503 (overloaded)
+    // Try each model; move to next on any non-200 response
     for (const model of GEMINI_MODELS) {
-      let got503 = false;
-      for (let attempt = 0; attempt < 2; attempt++) {
+      response = await fetch(
+        `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(geminiBody) }
+      );
+      data = await response.json();
+      if (response.ok) { usedModel = model; break; }
+      // Retry once on 503 (overload) before trying next model
+      if (response.status === 503) {
+        await new Promise(r => setTimeout(r, 1500));
         response = await fetch(
           `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`,
           { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(geminiBody) }
         );
         data = await response.json();
-        if (response.status !== 503) { got503 = false; break; }
-        got503 = true;
-        if (attempt === 0) await new Promise(r => setTimeout(r, 1000));
+        if (response.ok) { usedModel = model; break; }
       }
-      if (!got503) { usedModel = model; break; }
-      console.warn(`Model ${model} returned 503, trying next...`);
+      console.warn(`Model ${model} failed (${response.status}), trying next...`);
     }
 
     if (!response.ok) {
-      console.error('Gemini error:', JSON.stringify(data));
+      console.error('All models failed. Last error:', JSON.stringify(data));
       return res.status(response.status).json(data);
     }
 
     const parts = data.candidates?.[0]?.content?.parts || [];
     const text = parts.map(p => p.text || '').join('');
-    console.log(`Used model: ${usedModel}, response length: ${text.length}`);
+    console.log(`Used model: ${usedModel}, text length: ${text.length}`);
     return res.status(200).json({ content: [{ type: 'text', text }], model: usedModel, role: 'assistant' });
   } catch (err) {
     console.error('Gemini proxy error:', err);

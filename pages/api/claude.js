@@ -1,10 +1,9 @@
-const GEMINI_MODEL = 'gemini-2.5-flash-lite';
  * Secure proxy for Google Gemini API.
  * GET /api/claude -> lists available Gemini models
  * POST /api/claude -> proxies generateContent
  */
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-2.0-flash-001';
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
 function toGeminiContents(messages) {
@@ -72,7 +71,7 @@ export default async function handler(req, res) {
                         console.error('Gemini error:', JSON.stringify(data));
                         return res.status(response.status).json(data);
             }const parts = data.candidates?.[0]?.content?.parts || [];
-            const text = parts.filter(p => !p.thought).map(p => p.text || '').join('');
+            const text = parts.map(p => p.text || '').join('');
     return res.status(200).json({ content: [{ type: 'text', text }], model: GEMINI_MODEL, role: 'assistant' });
   } catch (err) {
     console.error('Gemini proxy error:', err);

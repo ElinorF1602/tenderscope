@@ -167,12 +167,44 @@ const parseDeadline = (str) => {
   return null;
 };
 
+// ─── URL hygiene (reject Gemini grounding redirects + search-engine junk) ─────
+const BAD_URL_PATTERNS = [
+  "vertexaisearch.cloud.google.com",
+  "google.com/search",
+  "www.google.com/search",
+  "bing.com/search",
+  "www.bing.com/search",
+  "duckduckgo.com/?q",
+  "webcache.googleusercontent.com",
+  "translate.google.com",
+];
+const isBadTenderUrl = (url) => {
+  if (!url || typeof url !== "string") return true;
+  const lower = url.toLowerCase();
+  if (!lower.startsWith("http")) return true;
+  return BAD_URL_PATTERNS.some(p => lower.includes(p));
+};
+
+// Extract a clean hostname from a URL, or null if not parseable
+const hostOf = (url) => {
+  try { return new URL(url).hostname.toLowerCase().replace(/^www\./, ""); }
+  catch { return null; }
+};
+
+const STALE_DAYS = 30;
 const isTenderActive = (t) => {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const dl = getTenderDeadline(t);
   const title = getTenderTitle(t);
   const d = parseDeadline(dl + " " + title);
   if (d) return d >= today;
+  // Unknown deadline — only keep if the tender was scanned/added recently.
+  // This prevents stale "לא ידוע" tenders from lingering forever.
+  if (t.scannedAt) {
+    const ageMs = Date.now() - new Date(t.scannedAt).getTime();
+    const ageDays = ageMs / (1000 * 60 * 60 * 24);
+    return ageDays <= STALE_DAYS;
+  }
   return true;
 };
 
@@ -220,16 +252,21 @@ export default function App() {
     setScanning(true);
     setScanMsg("🔍 מחפש מכרזי ניהול ופיקוח...");
 
+    const todayIso   = new Date().toISOString().slice(0, 10);
+    const todayHe    = new Date().toLocaleDateString("he-IL");
+    const todayMs    = new Date().setHours(0, 0, 0, 0);
+
     let foundTenders = [];
+    let groundingSources = [];
     try {
       const searchData = await callClaude({
         model: "claude-sonnet-4-20250514",
         max_tokens: 3000,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
-        system: "אתה עוזר שמחפש מכרזי ניהול ופיקוח פרויקטים בישראל. השתמש בחיפוש Google כדי למצוא מכרזים רלוונטיים פתוחים. חפש ישירות ב-Google ולא רק באתרים עצמם — חלק מהאתרים טוענים תוכן דינמי. החזר JSON בלבד.",
+        system: `אתה עוזר שמחפש מכרזי ניהול ופיקוח פרויקטים בישראל. היום: ${todayIso}. החזר רק מכרזים פתוחים שמועד ההגשה שלהם חל אחרי היום. אם אינך בטוח שהמכרז פתוח — אל תכלול אותו. עדיף להחזיר פחות תוצאות מאשר להמציא. החזר JSON בלבד ללא markdown.`,
         messages: [{
           role: "user",
-          content: `היום: ${new Date().toLocaleDateString("he-IL")}. חפש ב-Google מכרזים פתוחים לניהול ופיקוח / ניהול ותכנון פרויקטי בנייה ותשתיות בישראל.
+          content: `היום: ${todayHe} (${todayIso}). חפש ב-Google מכרזים פתוחים לניהול ופיקוח / ניהול ותכנון פרויקטי בנייה ותשתיות בישראל.
 
 חפש בגוגל בעברית: "מכרז ניהול פיקוח בנייה" OR "מכרז פיקוח עליון" OR "מכרז מנהל בנייה" OR "מכרז בקרת חשבונות" site:muni.il OR site:gov.il OR site:co.il
 
@@ -238,14 +275,21 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
 
 תחומים: ניהול פרויקט, פיקוח עליון, פיקוח צמוד, מפקח בנייה, מנהל בנייה, ניהול תכנון, ניהול ופיקוח, בקרת חשבונות קבלניים, בקרת חשבונות מתכננים, תכנון בינלאומי, ייעוץ הנדסי בינלאומי.
 
-כלול רק מכרזים פתוחים עם מועד הגשה עתידי. אל תכלול מכרזים שנסגרו.
-אם אתר לא נגיש — חפש את המכרזים שלו ב-Google במקום.
+כללים קריטיים — חובה:
+1. כלול רק מכרזים שמועד ההגשה שלהם אחרי ${todayIso}. מכרזים שנסגרו — אסור.
+2. אם לא הצלחת לזהות מועד הגשה מדויק בפורמט DD.MM.YYYY — אל תכלול את המכרז כלל.
+3. url חייב להיות קישור ישיר לדף המכרז באתר המזמין. אסורים בהחלט: קישורי גוגל, קישורי חיפוש, vertexaisearch, google.com/search, bing.com/search, webcache. אם אין קישור ישיר — אל תחזיר את המכרז.
+4. עדיף 2 מכרזים אמיתיים עם קישורים ישירים ומועדי הגשה מדויקים — מאשר 8 מכרזים לא מאומתים.
+5. אל תכלול מכרזים שראית רק בעיון בארכיון או שהמועד שלהם מוטל בספק.
 
 החזר JSON בלבד (ללא markdown):
-{"tenders":[{"title":"שם","source":"אתר","url":"קישור מלא לדף המכרז","deadline":"DD.MM.YYYY או לא ידוע","value":"ערך או לא ידוע"}]}
-מצא עד 8 מכרזים פתוחים.`,
+{"tenders":[{"title":"שם","source":"אתר","url":"קישור מלא לדף המכרז באתר המזמין","deadline":"DD.MM.YYYY","value":"ערך או לא ידוע"}]}
+מצא עד 8 מכרזים פתוחים — או פחות אם אין כאלה.`,
         }],
       });
+
+      // Real source URLs from Gemini grounding metadata (set by /api/claude proxy)
+      groundingSources = Array.isArray(searchData?._grounding?.sources) ? searchData._grounding.sources : [];
 
       const textBlocks = (searchData.content || []).filter(b => b.type === "text").map(b => b.text || "").join("");
       const cleaned = textBlocks.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
@@ -255,13 +299,25 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
         const parsed = JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1));
         foundTenders = parsed.tenders || [];
       }
-      // Track which sites had tenders found
+
+      // Extract which sites had tenders — use grounding metadata (real hostnames)
+      // as the primary source, and fall back to parsed tender URLs.
       const sitesFound = new Set();
-      foundTenders.forEach(t => {
-        if (t.source) sitesFound.add(t.source.toLowerCase().trim());
-        if (t.url) {
-          try { sitesFound.add(new URL(t.url).hostname.toLowerCase().replace(/^www\./, "")); } catch {}
+      for (const g of groundingSources) {
+        const host = hostOf(g.uri);
+        if (host && !BAD_URL_PATTERNS.some(p => host.includes(p.split("/")[0]))) {
+          sitesFound.add(host);
         }
+        // title often carries the real domain (e.g. "tel-aviv.gov.il") even when uri is a redirect
+        if (g.title && typeof g.title === "string") {
+          const t = g.title.toLowerCase().trim().replace(/^www\./, "");
+          if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(t)) sitesFound.add(t);
+        }
+      }
+      foundTenders.forEach(t => {
+        if (t.source && typeof t.source === "string") sitesFound.add(t.source.toLowerCase().trim());
+        const host = hostOf(t.url);
+        if (host) sitesFound.add(host);
       });
       setSitesWithTenders(sitesFound);
       await db.set("sitesWithTenders", [...sitesFound]);
@@ -280,12 +336,13 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
 
     const existingUrls   = new Set(existing.map(t => t.url).filter(Boolean));
     const existingTitles = new Set(existing.map(t => getTenderTitle(t)));
-    const todayMs = new Date().setHours(0, 0, 0, 0);
     const newTenders = foundTenders.filter(t => {
       if (!t.url) return false;
+      if (isBadTenderUrl(t.url)) return false;                              // drop grounding-redirect & search-engine URLs
       if (existingUrls.has(t.url) || existingTitles.has(t.title)) return false;
       const d = parseDeadline(t.deadline);
-      if (d && d.getTime() < todayMs) return false;
+      if (!d) return false;                                                 // drop unknown/unparseable deadlines at scan time
+      if (d.getTime() < todayMs) return false;                              // drop past deadlines
       return true;
     });
 
@@ -548,7 +605,7 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
           })}
           {lastScan && (
             <span style={{ fontSize: 9, color: "#94a3b8", marginRight: "auto", whiteSpace: "nowrap" }}>
-              <span style={{ color: "#16a34a" }}>✓</span> מכרזים נמצאו  
+              <span style={{ color: "#16a34a" }}>✓</span> מכרזים נמצאו &nbsp;
               <span style={{ color: "#94a3b8" }}>✓</span> נסרק, אין מכרזים
             </span>
           )}
@@ -788,7 +845,7 @@ function DetailPanel({ tender: t, onClose, onSaveYariv, onAddDocs }) {
           )}
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
-          <button className="btn" onClick={onClose} style={{ background: "none", color: "#64748b", fontSize: 18, padding: "4px 4px" }}>✕</button>
+          <button className="btn" onClick={onClose} style={{ background: "none", color: "#64748b", fontSize: 18, padding: "2px 4px" }}>✕</button>
           <button className="btn" onClick={exportPdf} style={{ background: "rgba(220,38,38,0.06)", border: "1px solid rgba(220,38,38,0.2)", color: "#dc2626", fontSize: 11, padding: "4px 7px", borderRadius: 6, fontWeight: 700 }}>📄 PDF</button>
         </div>
       </div>

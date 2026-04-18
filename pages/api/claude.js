@@ -3,8 +3,10 @@
  * GET  /api/claude  -> lists available Gemini models
  * POST /api/claude  -> proxies generateContent with model fallback
  *
- * Returns Anthropic-shaped responses + an extra `_grounding` field
- * containing real source URLs/titles from Gemini's grounding metadata.
+ * Returns Anthropic-shaped responses + an extra `_grounding` field containing
+ * RESOLVED source URLs. Gemini's grounding chunks come back as
+ * vertexaisearch.cloud.google.com redirects; we follow each one here so the
+ * client gets the real, permanent URL (tel-aviv.gov.il/..., mr.gov.il/..., etc.)
  */
 
 const GEMINI_MODELS = [
@@ -39,22 +41,45 @@ function toGeminiContents(messages) {
   });
 }
 
-// Extract real sources from Gemini's grounding metadata so the client
-// can see which actual domains were hit (not the vertexaisearch redirects).
-function extractGrounding(data) {
+// Follow a vertexaisearch grounding redirect to its real destination.
+// Uses a short per-URL timeout so one slow redirect can't block the scan.
+async function resolveRedirect(uri, timeoutMs = 4000) {
+  if (!uri || typeof uri !== 'string' || !uri.startsWith('http')) return uri;
+  if (!uri.includes('vertexaisearch.cloud.google.com')) return uri;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    // HEAD first (cheap); fall back to GET if the server rejects HEAD.
+    let r = await fetch(uri, { method: 'HEAD', redirect: 'follow', signal: ctrl.signal });
+    if (!r.ok || !r.url || r.url === uri) {
+      r = await fetch(uri, { method: 'GET', redirect: 'follow', signal: ctrl.signal });
+    }
+    return r.url && r.url !== uri ? r.url : uri;
+  } catch {
+    return uri;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Extract real sources from Gemini's grounding metadata and resolve the redirects.
+async function extractGrounding(data) {
   const gm = data?.candidates?.[0]?.groundingMetadata || {};
   const chunks = Array.isArray(gm.groundingChunks) ? gm.groundingChunks : [];
-  const sources = chunks
-    .map(c => c.web)
-    .filter(Boolean)
-    .map(w => ({
-      uri: w.uri || '',
+  const sources = await Promise.all(chunks.map(async c => {
+    const w = c?.web;
+    if (!w) return null;
+    const uri = w.uri || '';
+    const resolvedUri = uri ? await resolveRedirect(uri) : '';
+    return {
+      uri,
+      resolvedUri,
       // Gemini's `title` often contains the real hostname (e.g. "tel-aviv.gov.il")
-      // even when `uri` is a vertexaisearch redirect.
       title: w.title || '',
-    }));
+    };
+  }));
   return {
-    sources,
+    sources: sources.filter(Boolean),
     queries: Array.isArray(gm.webSearchQueries) ? gm.webSearchQueries : [],
   };
 }
@@ -113,7 +138,7 @@ export default async function handler(req, res) {
 
     const parts = data.candidates?.[0]?.content?.parts || [];
     const text = parts.map(p => p.text || '').join('');
-    const grounding = extractGrounding(data);
+    const grounding = await extractGrounding(data);
 
     console.log(`Used model: ${usedModel}, text length: ${text.length}, grounding sources: ${grounding.sources.length}`);
 

@@ -252,9 +252,9 @@ export default function App() {
     setScanning(true);
     setScanMsg("🔍 מחפש מכרזי ניהול ופיקוח...");
 
-    const todayIso   = new Date().toISOString().slice(0, 10);
-    const todayHe    = new Date().toLocaleDateString("he-IL");
-    const todayMs    = new Date().setHours(0, 0, 0, 0);
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const todayHe  = new Date().toLocaleDateString("he-IL");
+    const todayMs  = new Date().setHours(0, 0, 0, 0);
 
     let foundTenders = [];
     let groundingSources = [];
@@ -263,7 +263,7 @@ export default function App() {
         model: "claude-sonnet-4-20250514",
         max_tokens: 3000,
         tools: [{ type: "web_search_20250305", name: "web_search" }],
-        system: `אתה עוזר שמחפש מכרזי ניהול ופיקוח פרויקטים בישראל. היום: ${todayIso}. החזר רק מכרזים פתוחים שמועד ההגשה שלהם חל אחרי היום. אם אינך בטוח שהמכרז פתוח — אל תכלול אותו. עדיף להחזיר פחות תוצאות מאשר להמציא. החזר JSON בלבד ללא markdown.`,
+        system: "אתה עוזר שמחפש מכרזי ניהול ופיקוח פרויקטים בישראל. השתמש בחיפוש Google כדי למצוא מכרזים רלוונטיים פתוחים. חפש ישירות ב-Google ולא רק באתרים עצמם — חלק מהאתרים טוענים תוכן דינמי. החזר JSON בלבד.",
         messages: [{
           role: "user",
           content: `היום: ${todayHe} (${todayIso}). חפש ב-Google מכרזים פתוחים לניהול ופיקוח / ניהול ותכנון פרויקטי בנייה ותשתיות בישראל.
@@ -275,20 +275,19 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
 
 תחומים: ניהול פרויקט, פיקוח עליון, פיקוח צמוד, מפקח בנייה, מנהל בנייה, ניהול תכנון, ניהול ופיקוח, בקרת חשבונות קבלניים, בקרת חשבונות מתכננים, תכנון בינלאומי, ייעוץ הנדסי בינלאומי.
 
-כללים קריטיים — חובה:
-1. כלול רק מכרזים שמועד ההגשה שלהם אחרי ${todayIso}. מכרזים שנסגרו — אסור.
-2. אם לא הצלחת לזהות מועד הגשה מדויק בפורמט DD.MM.YYYY — אל תכלול את המכרז כלל.
-3. url חייב להיות קישור ישיר לדף המכרז באתר המזמין. אסורים בהחלט: קישורי גוגל, קישורי חיפוש, vertexaisearch, google.com/search, bing.com/search, webcache. אם אין קישור ישיר — אל תחזיר את המכרז.
-4. עדיף 2 מכרזים אמיתיים עם קישורים ישירים ומועדי הגשה מדויקים — מאשר 8 מכרזים לא מאומתים.
-5. אל תכלול מכרזים שראית רק בעיון בארכיון או שהמועד שלהם מוטל בספק.
+כלול רק מכרזים פתוחים עם מועד הגשה עתידי (אחרי ${todayIso}). אל תכלול מכרזים שנסגרו.
+אם אתר לא נגיש — חפש את המכרזים שלו ב-Google במקום.
+שים ב-url את הקישור הישיר הטוב ביותר שמצאת לדף המכרז. אם אין מועד הגשה ברור כתוב "לא ידוע".
 
 החזר JSON בלבד (ללא markdown):
-{"tenders":[{"title":"שם","source":"אתר","url":"קישור מלא לדף המכרז באתר המזמין","deadline":"DD.MM.YYYY","value":"ערך או לא ידוע"}]}
-מצא עד 8 מכרזים פתוחים — או פחות אם אין כאלה.`,
+{"tenders":[{"title":"שם","source":"אתר","url":"קישור לדף המכרז","deadline":"DD.MM.YYYY או לא ידוע","value":"ערך או לא ידוע"}]}
+מצא עד 8 מכרזים פתוחים.`,
         }],
       });
 
-      // Real source URLs from Gemini grounding metadata (set by /api/claude proxy)
+      // Real source URLs from Gemini grounding metadata (set by /api/claude proxy).
+      // The proxy pre-resolves vertexaisearch redirects, so resolvedUri is the
+      // actual destination site (e.g. https://tel-aviv.gov.il/...).
       groundingSources = Array.isArray(searchData?._grounding?.sources) ? searchData._grounding.sources : [];
 
       const textBlocks = (searchData.content || []).filter(b => b.type === "text").map(b => b.text || "").join("");
@@ -300,24 +299,39 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
         foundTenders = parsed.tenders || [];
       }
 
-      // Extract which sites had tenders — use grounding metadata (real hostnames)
-      // as the primary source, and fall back to parsed tender URLs.
+      // Build redirect map: original vertexaisearch URI -> resolved real URL.
+      // Gemini often embeds the redirect URI in its tender.url field; we swap
+      // those for the real URL before filtering or storing.
+      const redirectMap = new Map();
+      for (const g of groundingSources) {
+        if (g.uri && g.resolvedUri && g.uri !== g.resolvedUri) {
+          redirectMap.set(g.uri, g.resolvedUri);
+        }
+      }
+      foundTenders = foundTenders.map(t => {
+        if (t.url && redirectMap.has(t.url)) return { ...t, url: redirectMap.get(t.url) };
+        return t;
+      });
+
+      // Extract which sites had tenders — use the RESOLVED grounding URIs
+      // (real hostnames) as the primary source, plus any hostnames from the
+      // parsed tender URLs themselves.
       const sitesFound = new Set();
       for (const g of groundingSources) {
-        const host = hostOf(g.uri);
-        if (host && !BAD_URL_PATTERNS.some(p => host.includes(p.split("/")[0]))) {
+        const host = hostOf(g.resolvedUri) || hostOf(g.uri);
+        if (host && !host.includes("vertexaisearch") && !host.includes("googleusercontent")) {
           sitesFound.add(host);
         }
-        // title often carries the real domain (e.g. "tel-aviv.gov.il") even when uri is a redirect
+        // title often carries the real domain (e.g. "tel-aviv.gov.il")
         if (g.title && typeof g.title === "string") {
-          const t = g.title.toLowerCase().trim().replace(/^www\./, "");
-          if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(t)) sitesFound.add(t);
+          const tt = g.title.toLowerCase().trim().replace(/^www\./, "");
+          if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(tt)) sitesFound.add(tt);
         }
       }
       foundTenders.forEach(t => {
         if (t.source && typeof t.source === "string") sitesFound.add(t.source.toLowerCase().trim());
         const host = hostOf(t.url);
-        if (host) sitesFound.add(host);
+        if (host && !host.includes("vertexaisearch")) sitesFound.add(host);
       });
       setSitesWithTenders(sitesFound);
       await db.set("sitesWithTenders", [...sitesFound]);
@@ -338,11 +352,10 @@ mr.gov.il, hameshakem.co.il, masham.org.il, tel-aviv.gov.il, jerusalem.muni.il, 
     const existingTitles = new Set(existing.map(t => getTenderTitle(t)));
     const newTenders = foundTenders.filter(t => {
       if (!t.url) return false;
-      if (isBadTenderUrl(t.url)) return false;                              // drop grounding-redirect & search-engine URLs
+      if (isBadTenderUrl(t.url)) return false;                      // drop any residual redirect/search-engine URLs
       if (existingUrls.has(t.url) || existingTitles.has(t.title)) return false;
       const d = parseDeadline(t.deadline);
-      if (!d) return false;                                                 // drop unknown/unparseable deadlines at scan time
-      if (d.getTime() < todayMs) return false;                              // drop past deadlines
+      if (d && d.getTime() < todayMs) return false;                 // drop only known-past deadlines; unknown deadlines pass
       return true;
     });
 

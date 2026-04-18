@@ -1,10 +1,12 @@
 /**
  * Secure proxy for Google Gemini API.
- * GET /api/claude -> lists available Gemini models
- * POST /api/claude -> proxies generateContent with model fallback
+ * GET  /api/claude  -> lists available Gemini models
+ * POST /api/claude  -> proxies generateContent with model fallback
+ *
+ * Returns Anthropic-shaped responses + an extra `_grounding` field
+ * containing real source URLs/titles from Gemini's grounding metadata.
  */
 
-// Try models in order; skip to next on any error (503=overload, 404=unavailable, etc.)
 const GEMINI_MODELS = [
   'gemini-2.5-flash-lite',
   'gemini-flash-lite-latest',
@@ -37,8 +39,29 @@ function toGeminiContents(messages) {
   });
 }
 
+// Extract real sources from Gemini's grounding metadata so the client
+// can see which actual domains were hit (not the vertexaisearch redirects).
+function extractGrounding(data) {
+  const gm = data?.candidates?.[0]?.groundingMetadata || {};
+  const chunks = Array.isArray(gm.groundingChunks) ? gm.groundingChunks : [];
+  const sources = chunks
+    .map(c => c.web)
+    .filter(Boolean)
+    .map(w => ({
+      uri: w.uri || '',
+      // Gemini's `title` often contains the real hostname (e.g. "tel-aviv.gov.il")
+      // even when `uri` is a vertexaisearch redirect.
+      title: w.title || '',
+    }));
+  return {
+    sources,
+    queries: Array.isArray(gm.webSearchQueries) ? gm.webSearchQueries : [],
+  };
+}
+
 export default async function handler(req, res) {
   const apiKey = process.env.GOOGLE_API_KEY;
+
   if (req.method === 'GET') {
     const r = await fetch(`${GEMINI_BASE}/models?key=${apiKey}`);
     const d = await r.json();
@@ -49,6 +72,7 @@ export default async function handler(req, res) {
   try {
     const body = req.body;
     const usesWebSearch = Array.isArray(body?.tools) && body.tools.length > 0;
+
     const geminiBody = {
       contents: toGeminiContents(body.messages || []),
       generationConfig: { maxOutputTokens: body.max_tokens || 8192 },
@@ -62,7 +86,6 @@ export default async function handler(req, res) {
 
     let response, data, usedModel;
 
-    // Try each model; move to next on any non-200 response
     for (const model of GEMINI_MODELS) {
       response = await fetch(
         `${GEMINI_BASE}/models/${model}:generateContent?key=${apiKey}`,
@@ -70,7 +93,7 @@ export default async function handler(req, res) {
       );
       data = await response.json();
       if (response.ok) { usedModel = model; break; }
-      // Retry once on 503 (overload) before trying next model
+
       if (response.status === 503) {
         await new Promise(r => setTimeout(r, 1500));
         response = await fetch(
@@ -90,8 +113,16 @@ export default async function handler(req, res) {
 
     const parts = data.candidates?.[0]?.content?.parts || [];
     const text = parts.map(p => p.text || '').join('');
-    console.log(`Used model: ${usedModel}, text length: ${text.length}`);
-    return res.status(200).json({ content: [{ type: 'text', text }], model: usedModel, role: 'assistant' });
+    const grounding = extractGrounding(data);
+
+    console.log(`Used model: ${usedModel}, text length: ${text.length}, grounding sources: ${grounding.sources.length}`);
+
+    return res.status(200).json({
+      content: [{ type: 'text', text }],
+      model: usedModel,
+      role: 'assistant',
+      _grounding: grounding,
+    });
   } catch (err) {
     console.error('Gemini proxy error:', err);
     return res.status(500).json({ error: { message: err.message } });
